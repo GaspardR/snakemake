@@ -135,7 +135,8 @@ def lookup(
     ``lookup(query="sample == '{sample}'", within=samples, cols=["somecolumn"])`` or to
     a single column, e.g.
     ``lookup(query="sample == '{sample}'", within=samples, cols="somecolumn")``.
-    In the latter case, just a list of items in that column is returned.
+    In the latter case, the scalar value is returned when the query matches a
+    single row, or a list of values when it matches multiple rows.
     Finally, if the integer argument ``is_nrows`` is used, this returns true
     if there are that many rows in the query results, false otherwise.
 
