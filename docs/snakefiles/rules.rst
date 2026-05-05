@@ -458,8 +458,8 @@ named tuples with the column names as attributes.
 If the query results in a single row, the result is returned as a single
 named tuple with the column names as attributes.
 If the query or dpath parameter is given a function, the function will be evaluated with wildcards passed as the first argument.
-In case of dpath, if the dpath is not found, a ``LookupError`` is raised, unless a
-default fallback value is provided via the ``default`` argument (this argument is ignored in case of ``query``).
+If the dpath is not found or the query returns no matching rows, the ``default`` fallback
+value is returned if provided. Otherwise, a ``LookupError`` is raised (for dpath) or an empty list is returned (for query).
 Note: ``None`` is also a valid default value.
 
 In both cases (``dpath`` and ``query``), the result can be used by the ``expand`` or ``collect`` function,
@@ -741,15 +741,27 @@ Sub-path access
 
 In some cases, it is useful to access a sub-path of an input or output file or directory.
 For this purpose, Snakemake provides the ``subpath`` function.
-It has the signature ``subpath(path_or_func, strip_suffix=None, basename=False, parent=False, ancestor=None)``.
+It has the signature ``subpath(path_or_func, strip_suffix=None, with_suffix=None, basename=False, parent=False, ancestor=None)``.
 If a path is given as first argument (of type ``str`` or ``pathlib.Path``), the function directly returns the sub-path of the given path.
 Thereby, the sub-path is determined depending on the other arguments.
 
-If a ``str`` is given to ``strip_suffix``, this suffix is stripped from the path before determining the sub-path (a ``ValueError`` error is thrown if the path does not have the suffix).
+If a ``str`` is given to ``strip_suffix``, this suffix is stripped from the path (a ``ValueError`` is thrown if the path does not have the suffix).
 
 .. code-block:: python
 
     subpath("results/test.txt", strip_suffix=".txt") # returns "results/test"
+
+If a ``str`` is given to ``with_suffix``, this suffix is added to the path.
+
+.. code-block:: python
+
+    subpath("results/test.txt", with_suffix=".gz") # returns "results/test.txt.gz"
+
+The two arguments ``strip_suffix`` and ``with_suffix`` can be used in combination, e.g.
+
+.. code-block:: python
+
+    subpath("results/test.txt", strip_suffix=".txt", with_suffix=".csv") # returns "results/test.csv"
 
 If ``basename`` is set to ``True``, the basename of the path is returned (e.g. ``test.txt`` in case the path is ``results/test.txt``).
 
@@ -796,6 +808,49 @@ When selecting input files, sometimes you might end up with an irregular list of
 .. code-block:: python
 
     flatten([1, "a", [2,"b"], ["c","d",["e", 3]]]) # returns ["1", "a", "2", "b", "c", "d", "e", "3"]
+
+
+.. _snakefiles-python-module:
+
+as_py_module
+""""""""""""
+When running a Python script under active development,
+which relies on relative imports
+you may want to have the script as an input file,
+but call it by its module name.
+The ``as_py_module`` function will
+translate a given script filename
+into a module name that may be used with ``python -m``.
+For example,
+
+.. code-block:: python
+
+    rule:
+        params:
+            module=as_py_module(),
+        input:
+            script="some_package/some_subpackage/some_module.py",
+        output:
+            "..."
+        shell:
+            "python -m {params.module} --output_file {output}"
+
+The helper by default looks at ``input.script``.
+Other values may be used by using
+:ref:`Snakemake's rule item access helpers <snakefiles-rule-item-access>`,
+e.g.
+
+.. code-block:: python
+
+    rule:
+        params:
+            module=as_py_module(input.my_script),
+        input:
+            my_script="some_package/some_subpackage/some_module.py",
+        output:
+            "..."
+        shell:
+            "python -m {params.module} --output_file {output}"
 
 
 .. _snakefiles-targets:
@@ -931,7 +986,7 @@ Snakemake will always round the calculated value down (while enforcing a minimum
 Starting from version 3.7, threads can also be a callable that returns an ``int`` value. The signature of the callable should be ``callable(wildcards[, input])`` (input is an optional parameter).  It is also possible to refer to a predefined variable (e.g, ``threads: threads_max``) so that the number of cores for a set of rules can be changed with one change only by altering the value of the variable ``threads_max``.
 
 Both threads can be defined (or overwritten) upon invocation (without modifying the workflow code) via `--set-threads` see :ref:`all_options` and via workflow profiles, see :ref:`executing-profiles`.
-To quickly exemplify the latter, you could provide the following workflow profile in a file ``profiles/default/config.yaml`` relative to the Snakefile or the current working directory:
+To quickly exemplify the latter, you could provide the following workflow profile in a file ``profiles/default/profile.yaml`` relative to the Snakefile or the current working directory:
 
 .. code-block:: yaml
 
@@ -1046,7 +1101,7 @@ Of course, any other arithmetic could be performed in that function.
 
 Both threads and resources can be defined (or overwritten) upon invocation (without modifying the workflow code) via `--set-threads` and `--set-resources`, see :ref:`all_options`.
 Or they can be defined via workflow :ref:`executing-profiles`, with the variables listed above in the signature for usable callables.
-You could, for example, provide the following workflow profile in a file ``profiles/default/config.yaml`` relative to the Snakefile or the current working directory:
+You could, for example, provide the following workflow profile in a file ``profiles/default/profile.yaml`` relative to the Snakefile or the current working directory:
 
 .. code-block:: yaml
 
@@ -1208,7 +1263,7 @@ Note that access to wildcards is also possible via the variable ``wildcards`` (e
 Priorities
 ----------
 
-Snakemake allows for rules that specify numeric priorities:
+Snakemake allows for rules that specify numeric and/or callable priorities:
 
 
 .. code-block:: python
@@ -1220,6 +1275,21 @@ Snakemake allows for rules that specify numeric priorities:
       shell: ...
 
 Per default, each rule has a priority of 0. Any rule that specifies a higher priority, will be preferred by the scheduler over all rules that are ready to execute at the same time without having at least the same priority.
+
+Priority may also be specified with a callable. The callable receives ``wildcards``
+as its first positional argument, and may optionally accept ``input``, ``attempt``,
+and ``rulename`` keyword arguments (similar to param functions). It has to return the priority as an integer or float (will be rounded):
+
+.. code-block:: python
+
+    rule sort:
+        input: "{dataset}.txt"
+        output: "{dataset}.sorted"
+        priority: lambda wildcards, input: input.size_mb
+        shell: "sort {input} > {output}"
+
+This allows the scheduler to dynamically prioritise jobs based on, e.g., input
+file size so that larger jobs start first.
 
 Furthermore, the ``--prioritize`` or ``-P`` command line flag allows to specify files (or rules) that shall be created with highest priority during the workflow execution. This means that the scheduler will assign the specified target and all its dependencies highest priority, such that the target is finished as soon as possible.
 The ``--dry-run`` (equivalently ``--dryrun``) or ``-n`` option allows you to see the scheduling plan including the assigned priorities.
@@ -1250,6 +1320,8 @@ The log file has to use the same wildcards as output files, e.g.
 
     log: "logs/abc.{dataset}.log"
 
+
+.. note:: Using the ``log`` directive will not automatically redirect the rule's output towards the log file - this you will still need to facilitate yourself! The ``log`` directive merely prevents Snakemake from deleting the log file upon rule failure.
 
 For programs that do not have an explicit ``log`` parameter, you may always use ``2> {log}`` to redirect stderr to a file (here, the ``log`` file) in Linux-based systems.
 Note that it is also possible to have multiple named log files, which could be used to capture stdout and stderr:
@@ -1387,11 +1459,14 @@ An example external Python script could look like this:
 
     do_something(snakemake.input[0], snakemake.output[0], snakemake.threads, snakemake.config["myparam"])
 
-or using the explicit import:
+For type checking, it is possible to import the a correctly typed stub for the snakemake object:
 
 .. code-block:: python
 
-    from snakemake.script import snakemake
+    from typing import TYPE_CHECKING
+
+    if TYPE_CHECKING:
+        from snakemake.iocontainers import snakemake
 
     def do_something(data_path, out_path, threads, myparam):
         # python code
@@ -2047,7 +2122,10 @@ Ignoring timestamps
 -------------------
 
 For determining whether output files have to be re-created, Snakemake checks whether the file modification date (i.e. the timestamp) of any input file of the same job is newer than the timestamp of the output file.
-This behavior can be overridden by marking an input file as ``ancient``.
+Please note, however, that for small input files (of by default up to 1 MB, controlled by ``--max-checksum-file-size``),
+Snakemake instead records and compares file checksums and only reruns the rule if the input file checksum has changed,
+even if the timestamp of the input file is newer than the output file(s).
+This overall behavior can be overridden by marking an input file as ``ancient``.
 The timestamp of such files is ignored and always assumed to be older than any of the output files:
 
 .. code-block:: python
@@ -2264,6 +2342,24 @@ The ``onsuccess`` handler is executed if the workflow finished without error. Ot
 In both handlers, you have access to the variable ``log``, which contains the path to a logfile with the complete Snakemake output.
 Snakemake 3.6.0 adds an ``onstart`` handler, that will be executed before the workflow starts.
 Note that dry-runs do not trigger any of the handlers.
+
+When you are using :ref:`snakefiles-modules`, only the ``onstart``, ``onsuccess`` and ``onerror`` handlers of the top-level Snakefile are executed. Handlers defined inside module Snakefiles are not triggered automatically.
+To access the handlers from a specific module's Snakefile, you can use ``module_name.onstart``, ``module_name.onsuccess`` and ``module_name.onerror``.
+
+.. code-block:: python
+
+    module test1:
+        snakefile:
+            "module1/Snakefile"
+
+    use rule * from test1 as module1_*
+
+    onstart:
+        test1.onstart()
+    onsuccess:
+        test1.onsuccess()
+    onerror:
+        test1.onerror()
 
 
 Rule dependencies
@@ -2984,7 +3080,7 @@ Consider the following example where an arbitrary number of files is generated b
       output:
           directory("my_directory/")
       shell:'''
-      mkdir my_directory/
+      mkdir -p my_directory/
       cd my_directory
       for i in 1 2 3; do touch $i.txt; done
       '''
